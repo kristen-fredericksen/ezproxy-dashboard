@@ -1,0 +1,22 @@
+# Institution-specific data (not shared)
+data/institutions.csv
+
+# Log files
+test_logs/
+logs/
+
+# Generated output
+*.html
+*.csv
+!data/institutions_sample.csv
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# Claude Code
+.claude/

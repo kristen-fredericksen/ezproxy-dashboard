@@ -1,0 +1,6 @@
+Institution,IP Addresses
+Example University,"10.1.1.1 - 10.1.1.254
+10.2.0.1 - 10.2.0.254"
+Branch Campus,"192.168.50.1 - 192.168.50.100"
+Main Library,"172.16.0.50 (Reference desk)
+172.16.0.51 - 172.16.0.60"
