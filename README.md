@@ -1,6 +1,6 @@
 # EZproxy Dashboard
 
-Analyze EZproxy SPU (Starting Point URL) log files and generate a visual HTML dashboard with charts and statistics.
+Analyze EZproxy [Starting Point URL](https://help.oclc.org/Library_Management/EZproxy/EZproxy_configuration/Starting_point_URLs_and_config_txt) (SPU) log files and generate a visual HTML dashboard with charts and statistics.
 
 This project reads tab-separated EZproxy SPU logs, classifies connections by institution using IP address ranges, identifies databases and platforms from URLs, and produces either a terminal report or an interactive HTML dashboard with Chart.js.
 
