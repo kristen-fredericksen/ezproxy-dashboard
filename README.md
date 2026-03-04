@@ -24,6 +24,10 @@ python3 dashboard.py data/institutions.csv path/to/logfile.log output.html
 
 Open `output.html` in any browser to view the dashboard.
 
+![Dashboard top — summary cards, campus split, institution breakdown, top platforms and databases](screenshots/dashboard-top.png)
+
+![Dashboard bottom — hourly and daily charts, day of week, authentication, HTTP status](screenshots/dashboard-bottom.png)
+
 ### `analyze_log.py` — Terminal text report
 
 Prints detailed statistics to the terminal for quick analysis:
