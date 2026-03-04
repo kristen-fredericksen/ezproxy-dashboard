@@ -89,13 +89,13 @@ Entries marked `UNKNOWN` were found in logs but haven't been identified yet. You
 This tool expects **tab-separated SPU log files** in the following format:
 
 ```
-[timestamp]	IP	EMPLID	session_token	action	referrer	URL	status
+[timestamp]	IP	username	session_token	action	referrer	URL	status
 ```
 
 For example:
 
 ```
-[01/Feb/2026:08:15:32 -0500]	10.1.1.100	12345678	abc123	Login	-	https://example.com	200
+[01/Feb/2026:08:15:32 -0500]	10.1.1.100	jsmith	abc123	Login	-	https://example.com	200
 ```
 
 ## Credits
