@@ -245,4 +245,5 @@ def main():
     print(f"\nAll done!\n\nOutput: {output}")
 
 
-main()
+if __name__ == '__main__':
+    main()

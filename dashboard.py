@@ -7,6 +7,7 @@ Example:
     python3 dashboard.py data/institutions.csv test_logs/ezproxyspu_2026_02.log dashboard.html
 """
 
+import base64
 import csv
 import glob
 import ipaddress
@@ -16,8 +17,12 @@ import re
 import sys
 from collections import Counter
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 
 # ---------------------------------------------------------------------------
@@ -291,85 +296,87 @@ def compute_metrics(records: list, institution_ranges: dict, log_name: str,
     date_start = records[0]['timestamp'].strftime('%b %d, %Y')
     date_end = records[-1]['timestamp'].strftime('%b %d, %Y')
 
-    # --- Institution classification ---
+    # --- Single pass over records for all counters ---
     inst_counts = Counter()
+    emplids = set()
+    sessions = set()
+    authenticated = 0
+    platform_counts = Counter()
+    resource_counts = Counter()
+    primo_count = 0
+    hour_counts = Counter()
+    day_counts = Counter()
+    dow_counts = Counter()
+    status_counts = Counter()
+    action_counts = Counter()
+
     for r in records:
+        # Institution
         inst = classify_ip(r['ip'], institution_ranges)
         r['institution'] = inst
         inst_counts[inst] += 1
 
+        # Users & sessions
+        if r['emplid']:
+            emplids.add(r['emplid'])
+            authenticated += 1
+        if r['session']:
+            sessions.add(r['session'])
+
+        # Platforms & databases
+        platform = extract_platform_name(r['url'], db_names)
+        if platform:
+            platform_counts[platform] += 1
+        db_name = extract_database_name(r['url'], db_names)
+        if db_name:
+            resource_counts[db_name] += 1
+
+        # Primo referrals
+        if r['referrer'] and 'primo' in r['referrer'].lower():
+            primo_count += 1
+
+        # Time distributions
+        ts = r['timestamp']
+        hour_counts[ts.hour] += 1
+        day_counts[ts.strftime('%Y-%m-%d')] += 1
+        dow_counts[ts.strftime('%A')] += 1
+
+        # Status & actions
+        status_counts[r['status']] += 1
+        action_counts[r['action']] += 1
+
+    # --- Aggregate results ---
     off_campus = inst_counts.pop('Off-campus', 0)
     on_campus = sum(inst_counts.values())
 
-    # Sort institutions by count descending, skip zeros
     inst_breakdown = [
         {'name': name, 'count': count}
         for name, count in inst_counts.most_common()
         if count > 0
     ]
 
-    # --- Users & sessions ---
-    emplids = set()
-    sessions = set()
-    for r in records:
-        if r['emplid']:
-            emplids.add(r['emplid'])
-        if r['session']:
-            sessions.add(r['session'])
-
-    authenticated = sum(1 for r in records if r['emplid'])
-
-    # --- Top platforms (vendor/domain level) ---
-    platform_counts = Counter()
-    for r in records:
-        platform = extract_platform_name(r['url'], db_names)
-        if platform:
-            platform_counts[platform] += 1
-
     top_platforms = [
         {'name': name, 'count': count}
         for name, count in platform_counts.most_common(15)
     ]
-
-    # --- Top databases (specific database level) ---
-    resource_counts = Counter()
-    for r in records:
-        db_name = extract_database_name(r['url'], db_names)
-        if db_name:
-            resource_counts[db_name] += 1
 
     top_resources = [
         {'name': name, 'count': count}
         for name, count in resource_counts.most_common(20)
     ]
 
-    # --- Primo referrals ---
-    primo_count = sum(1 for r in records
-                      if r['referrer'] and 'primo' in r['referrer'].lower())
-
-    # --- Hourly distribution ---
-    hour_counts = Counter(r['timestamp'].hour for r in records)
     hourly = [hour_counts.get(h, 0) for h in range(24)]
 
-    # --- Daily distribution ---
-    day_counts = Counter(r['timestamp'].strftime('%Y-%m-%d') for r in records)
-    # Sort by date
     sorted_days = sorted(day_counts.items())
     daily_labels = [datetime.strptime(d, '%Y-%m-%d').strftime('%b %d') for d, _ in sorted_days]
     daily_values = [c for _, c in sorted_days]
 
-    # --- Day of week distribution ---
-    dow_counts = Counter(r['timestamp'].strftime('%A') for r in records)
     dow_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     dow_values = [dow_counts.get(d, 0) for d in dow_order]
 
-    # --- HTTP status codes ---
-    status_counts = Counter(r['status'] for r in records)
     status_data = [{'code': code, 'count': count}
                    for code, count in status_counts.most_common()]
 
-    # --- Action types ---
-    action_counts = Counter(r['action'] for r in records)
     action_data = [{'action': action, 'count': count}
                    for action, count in action_counts.most_common()]
 
@@ -396,6 +403,160 @@ def compute_metrics(records: list, institution_ranges: dict, log_name: str,
         'statusCodes': status_data,
         'actionTypes': action_data,
     }
+
+
+# ---------------------------------------------------------------------------
+# Excel export
+# ---------------------------------------------------------------------------
+
+def build_excel_data_uri(metrics: dict) -> tuple:
+    """Build a formatted Excel workbook from dashboard metrics.
+
+    Returns (data_uri_string, suggested_filename). The data URI can be
+    embedded directly in an <a href="..."> tag for one-click download.
+    """
+    wb = Workbook()
+
+    # -- Shared styles (12pt Arial per project convention) --
+    data_font = Font(name='Arial', size=12)
+    bold_font = Font(name='Arial', size=12, bold=True)
+    header_font = Font(name='Arial', size=12, bold=True, color='FFFFFF')
+    header_fill = PatternFill(start_color='2B6CB0', end_color='2B6CB0',
+                              fill_type='solid')
+    section_font = Font(name='Arial', size=14, bold=True, color='2B6CB0')
+    thin_border = Border(
+        left=Side(style='thin'), right=Side(style='thin'),
+        top=Side(style='thin'), bottom=Side(style='thin'),
+    )
+
+    def write_table(ws, headers, rows, start_row=1):
+        """Write a header row + data rows. Returns the next empty row."""
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=start_row, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal='center')
+            cell.border = thin_border
+        for r_idx, row_data in enumerate(rows, start_row + 1):
+            for c_idx, value in enumerate(row_data, 1):
+                cell = ws.cell(row=r_idx, column=c_idx, value=value)
+                cell.font = data_font
+                cell.border = thin_border
+        return start_row + 1 + len(rows)
+
+    def write_section_title(ws, row, title):
+        """Write a section title in a larger bold font."""
+        cell = ws.cell(row=row, column=1, value=title)
+        cell.font = section_font
+        return row + 1
+
+    def autofit_columns(ws):
+        """Set column widths based on content length."""
+        for col in ws.columns:
+            max_len = max((len(str(cell.value or '')) for cell in col), default=10)
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 50)
+
+    total = metrics['total']
+
+    # ---- Sheet 1: Summary ----
+    ws = wb.active
+    ws.title = 'Summary'
+    summary_rows = [
+        ('Log File', metrics['logName']),
+        ('Date Range', f"{metrics['dateStart']} – {metrics['dateEnd']}"),
+        ('Total Connections', f"{total:,}"),
+        ('Unique Users', f"{metrics['uniqueUsers']:,}"),
+        ('Unique Sessions', f"{metrics['uniqueSessions']:,}"),
+        ('Authenticated', f"{metrics['authenticated']:,}"),
+        ('Unauthenticated', f"{metrics['unauthenticated']:,}"),
+        ('On-Campus', f"{metrics['onCampus']:,}"),
+        ('Off-Campus', f"{metrics['offCampus']:,}"),
+        ('Primo Referrals', f"{metrics['primoReferrals']:,}"),
+    ]
+    for r_idx, (label, value) in enumerate(summary_rows, 1):
+        lbl_cell = ws.cell(row=r_idx, column=1, value=label)
+        lbl_cell.font = bold_font
+        val_cell = ws.cell(row=r_idx, column=2, value=value)
+        val_cell.font = data_font
+    autofit_columns(ws)
+
+    # ---- Sheet 2: Institutions ----
+    ws_inst = wb.create_sheet('Institutions')
+    rows = [(d['name'], d['count']) for d in metrics['institutionBreakdown']]
+    write_table(ws_inst, ['Institution', 'Connections'], rows)
+    autofit_columns(ws_inst)
+
+    # ---- Sheet 3: Platforms ----
+    ws_plat = wb.create_sheet('Platforms')
+    rows = [(d['name'], d['count']) for d in metrics['topPlatforms']]
+    write_table(ws_plat, ['Platform', 'Connections'], rows)
+    autofit_columns(ws_plat)
+
+    # ---- Sheet 4: Databases ----
+    ws_db = wb.create_sheet('Databases')
+    rows = [(d['name'], d['count']) for d in metrics['topResources']]
+    write_table(ws_db, ['Database', 'Connections'], rows)
+    autofit_columns(ws_db)
+
+    # ---- Sheet 5: Time Patterns ----
+    ws_time = wb.create_sheet('Time Patterns')
+    row = 1
+
+    # Hourly
+    row = write_section_title(ws_time, row, 'Hourly Distribution')
+    hour_labels = [f"{h % 12 or 12} {'am' if h < 12 else 'pm'}"
+                   for h in range(24)]
+    hour_rows = list(zip(hour_labels, metrics['hourly']))
+    row = write_table(ws_time, ['Hour', 'Connections'], hour_rows, start_row=row)
+    row += 1  # blank row separator
+
+    # Daily
+    row = write_section_title(ws_time, row, 'Daily Distribution')
+    daily_rows = list(zip(metrics['dailyLabels'], metrics['dailyValues']))
+    row = write_table(ws_time, ['Date', 'Connections'], daily_rows, start_row=row)
+    row += 1
+
+    # Day of week
+    row = write_section_title(ws_time, row, 'Day of Week')
+    dow_rows = list(zip(metrics['dowLabels'], metrics['dowValues']))
+    write_table(ws_time, ['Day', 'Connections'], dow_rows, start_row=row)
+    autofit_columns(ws_time)
+
+    # ---- Sheet 6: Status & Actions ----
+    ws_status = wb.create_sheet('Status & Actions')
+    row = 1
+
+    # Status codes
+    row = write_section_title(ws_status, row, 'HTTP Status Codes')
+    status_rows = []
+    for d in metrics['statusCodes']:
+        pct = f"{d['count'] / total * 100:.1f}%" if total else '0%'
+        status_rows.append((d['code'], d['count'], pct))
+    row = write_table(ws_status, ['Status Code', 'Count', '%'], status_rows,
+                      start_row=row)
+    row += 1
+
+    # Action types
+    row = write_section_title(ws_status, row, 'Action Types')
+    action_rows = []
+    for d in metrics['actionTypes']:
+        pct = f"{d['count'] / total * 100:.1f}%" if total else '0%'
+        action_rows.append((d['action'], d['count'], pct))
+    write_table(ws_status, ['Action', 'Count', '%'], action_rows, start_row=row)
+    autofit_columns(ws_status)
+
+    # ---- Serialize to base64 ----
+    buf = BytesIO()
+    wb.save(buf)
+    b64 = base64.b64encode(buf.getvalue()).decode('ascii')
+
+    safe_name = re.sub(r'[^\w\-]', '_', metrics['logName'].replace('.log', ''))
+    filename = f"ezproxy_report_{safe_name}.xlsx"
+    data_uri = (
+        'data:application/vnd.openxmlformats-officedocument'
+        f'.spreadsheetml.sheet;base64,{b64}'
+    )
+    return data_uri, filename
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +609,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   }
   .card .label {
     font-size: 10pt;
-    color: #718096;
+    color: #4a5568;
     margin-top: 4px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -523,12 +684,42 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     padding-top: 16px;
     border-top: 1px solid #e2e8f0;
   }
+
+  .export-buttons { margin-bottom: 20px; }
+  .export-buttons a {
+    display: inline-block;
+    font-family: Arial, sans-serif;
+    font-size: 11pt;
+    padding: 10px 24px;
+    background: #2b6cb0;
+    color: white;
+    text-decoration: none;
+    border-radius: 6px;
+    cursor: pointer;
+    margin-right: 10px;
+    transition: background 0.2s;
+  }
+  .export-buttons a:hover { background: #2c5282; }
+
+  @media print {
+    .export-buttons { display: none; }
+    body { background: white; padding: 0; }
+    .panel { box-shadow: none; break-inside: avoid; }
+    .card { box-shadow: none; }
+    .footer { border-top: none; }
+  }
 </style>
 </head>
 <body>
+<main>
 
 <h1>EZproxy Usage Dashboard</h1>
 <p class="subtitle">__LOG_NAME__ &nbsp;·&nbsp; __DATE_START__ – __DATE_END__</p>
+
+<div class="export-buttons">
+  <a href="#" role="button" onclick="window.print(); return false;">Save as PDF</a>
+  <a href="__EXCEL_DATA_URI__" download="__EXCEL_FILENAME__">Export to Excel</a>
+</div>
 
 <!-- Summary Cards -->
 <div class="cards">
@@ -559,13 +750,13 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="panel">
     <h2>On-Campus vs Off-Campus</h2>
     <div class="chart-container small">
-      <canvas id="campusPie"></canvas>
+      <canvas id="campusPie" aria-label="Doughnut chart showing on-campus versus off-campus connections" role="img"></canvas>
     </div>
   </div>
   <div class="panel">
     <h2>On-Campus by Institution</h2>
     <div class="chart-container">
-      <canvas id="instBar"></canvas>
+      <canvas id="instBar" aria-label="Bar chart showing connections by institution" role="img"></canvas>
     </div>
   </div>
 </div>
@@ -575,13 +766,13 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="panel">
     <h2>Top Platforms</h2>
     <div class="chart-container">
-      <canvas id="platformBar"></canvas>
+      <canvas id="platformBar" aria-label="Bar chart showing top platforms by connection count" role="img"></canvas>
     </div>
   </div>
   <div class="panel">
     <h2>Top Databases</h2>
     <div class="chart-container">
-      <canvas id="resourceBar"></canvas>
+      <canvas id="resourceBar" aria-label="Bar chart showing top databases by connection count" role="img"></canvas>
     </div>
   </div>
 </div>
@@ -591,13 +782,13 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="panel">
     <h2>Connections by Hour</h2>
     <div class="chart-container">
-      <canvas id="hourlyBar"></canvas>
+      <canvas id="hourlyBar" aria-label="Bar chart showing connections by hour of day" role="img"></canvas>
     </div>
   </div>
   <div class="panel">
     <h2>Connections by Day</h2>
     <div class="chart-container">
-      <canvas id="dailyBar"></canvas>
+      <canvas id="dailyBar" aria-label="Bar chart showing connections by date" role="img"></canvas>
     </div>
   </div>
 </div>
@@ -607,32 +798,33 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <div class="panel">
     <h2>Day of Week</h2>
     <div class="chart-container">
-      <canvas id="dowBar"></canvas>
+      <canvas id="dowBar" aria-label="Bar chart showing connections by day of week" role="img"></canvas>
     </div>
   </div>
   <div class="panel">
     <h2>Authenticated vs Not</h2>
     <div class="chart-container small">
-      <canvas id="authDonut"></canvas>
+      <canvas id="authDonut" aria-label="Doughnut chart showing authenticated versus unauthenticated connections" role="img"></canvas>
     </div>
   </div>
   <div class="panel">
     <h2>HTTP Status &amp; Actions</h2>
     <table>
-      <thead><tr><th>Status</th><th>Count</th><th>%</th></tr></thead>
+      <thead><tr><th scope="col">Status</th><th scope="col">Count</th><th scope="col">%</th></tr></thead>
       <tbody id="statusTable"></tbody>
     </table>
     <br>
     <table>
-      <thead><tr><th>Action</th><th>Count</th><th>%</th></tr></thead>
+      <thead><tr><th scope="col">Action</th><th scope="col">Count</th><th scope="col">%</th></tr></thead>
       <tbody id="actionTable"></tbody>
     </table>
   </div>
 </div>
 
-<div class="footer">
+<footer class="footer">
   Generated __GEN_DATE__ &nbsp;·&nbsp; EZproxy Analysis Dashboard
-</div>
+</footer>
+</main>
 
 <script>
 // --- Embedded data ---
@@ -824,18 +1016,21 @@ new Chart(document.getElementById('authDonut'), {
 // --- Status & Action Tables ---
 (function() {
   var total = DATA.total;
-  var tbody = document.getElementById('statusTable');
+  var html = '';
   DATA.statusCodes.forEach(function(d) {
     var pct = (d.count / total * 100).toFixed(1);
-    tbody.innerHTML += '<tr><td>' + d.code + '</td><td>' + d.count.toLocaleString() +
-                       '</td><td>' + pct + '%</td></tr>';
+    html += '<tr><td>' + d.code + '</td><td>' + d.count.toLocaleString() +
+            '</td><td>' + pct + '%</td></tr>';
   });
-  var atbody = document.getElementById('actionTable');
+  document.getElementById('statusTable').innerHTML = html;
+
+  html = '';
   DATA.actionTypes.forEach(function(d) {
     var pct = (d.count / total * 100).toFixed(1);
-    atbody.innerHTML += '<tr><td>' + d.action + '</td><td>' + d.count.toLocaleString() +
-                        '</td><td>' + pct + '%</td></tr>';
+    html += '<tr><td>' + d.action + '</td><td>' + d.count.toLocaleString() +
+            '</td><td>' + pct + '%</td></tr>';
   });
+  document.getElementById('actionTable').innerHTML = html;
 })();
 </script>
 </body>
@@ -915,12 +1110,18 @@ def main():
 
     metrics = compute_metrics(all_records, institution_ranges, log_name, db_names)
 
+    # Build Excel export
+    print("  Building Excel export...")
+    excel_data_uri, excel_filename = build_excel_data_uri(metrics)
+
     # Build HTML
     primo_pct = round(metrics['primoReferrals'] / metrics['total'] * 100, 1) if metrics['total'] else 0
     on_campus_pct = round(metrics['onCampus'] / metrics['total'] * 100, 1) if metrics['total'] else 0
     gen_date = datetime.now().strftime('%B %d, %Y at %I:%M %p')
 
     html = _HTML_TEMPLATE
+    html = html.replace('__EXCEL_DATA_URI__', excel_data_uri)
+    html = html.replace('__EXCEL_FILENAME__', excel_filename)
     html = html.replace('__LOG_NAME__', metrics['logName'])
     html = html.replace('__DATE_START__', metrics['dateStart'])
     html = html.replace('__DATE_END__', metrics['dateEnd'])

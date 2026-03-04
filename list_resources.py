@@ -136,4 +136,5 @@ def main():
     print(f"  Total databases: {len(db_counts)}")
 
 
-main()
+if __name__ == '__main__':
+    main()

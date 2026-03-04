@@ -68,7 +68,7 @@ IP addresses can be:
 
 ### 2. Run a script
 
-All scripts require Python 3 with no external dependencies (standard library only).
+Most scripts use only the Python 3 standard library. `dashboard.py` also requires `openpyxl` for the Excel export (`pip install openpyxl`).
 
 ```
 python3 dashboard.py data/institutions.csv your_log.log dashboard.html
