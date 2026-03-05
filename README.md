@@ -11,12 +11,15 @@ This project reads tab-separated EZproxy SPU logs, classifies connections by ins
 Generates a self-contained HTML file with interactive charts:
 
 - Summary cards (total connections, unique users, sessions, Primo referral rate)
+- Date range filter to narrow the dashboard to a specific period
 - On-campus vs off-campus pie chart
 - Institution breakdown bar chart
 - Top platforms and top databases (two side-by-side charts)
+- Top referring domains bar chart
 - Connections by hour, day, and day of week
 - Authenticated vs unauthenticated donut chart
 - HTTP status code and action type tables
+- Export to Excel (7 sheets) and Save as PDF
 
 ```
 python3 dashboard.py data/institutions.csv path/to/logfile.log output.html
@@ -24,7 +27,7 @@ python3 dashboard.py data/institutions.csv path/to/logfile.log output.html
 
 Open `output.html` in any browser to view the dashboard.
 
-![Dashboard top — summary cards, campus split, institution breakdown, top platforms and databases](screenshots/dashboard-top.png)
+![Dashboard top — export buttons, date filter, summary cards, campus split, institution breakdown, top platforms and databases](screenshots/dashboard-top.png)
 
 ![Dashboard bottom — hourly and daily charts, day of week, authentication, HTTP status](screenshots/dashboard-bottom.png)
 
