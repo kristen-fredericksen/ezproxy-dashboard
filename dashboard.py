@@ -567,7 +567,7 @@ def build_excel_data_uri(metrics: dict) -> tuple:
     write_table(ws_time, ['Day', 'Connections'], dow_rows, start_row=row)
     autofit_columns(ws_time)
 
-    # ---- Sheet 6: Status & Actions ----
+    # ---- Sheet 7: Status & Actions ----
     ws_status = wb.create_sheet('Status & Actions')
     row = 1
 
@@ -818,7 +818,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <input type="date" id="endDate">
   <button class="apply-btn" onclick="applyDateFilter()">Apply</button>
   <button class="reset-btn" onclick="resetDateFilter()">Reset</button>
-  <span class="filter-status" id="filterStatus"></span>
+  <span class="filter-status" id="filterStatus" aria-live="polite"></span>
 </div>
 
 <!-- Summary Cards -->
@@ -888,6 +888,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <!-- Row 4: Hourly + Daily -->
+
 <div class="grid-2">
   <div class="panel">
     <h2>Connections by Hour</h2>
@@ -903,7 +904,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Row 4: Day of week + Auth + Status -->
+<!-- Row 5: Day of week + Auth + Status -->
 <div class="grid-3">
   <div class="panel">
     <h2>Day of Week</h2>
@@ -1172,8 +1173,7 @@ function resetDateFilter() {
   document.getElementById('startDate').value = DATA.minDate;
   document.getElementById('endDate').value = DATA.maxDate;
   document.getElementById('filterStatus').textContent = '';
-  var m = computeFromRecords(DATA.records);
-  renderDashboard(m);
+  renderDashboard(DATA);
 }
 
 // --- Initialize ---
