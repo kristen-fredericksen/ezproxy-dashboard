@@ -619,13 +619,13 @@
         "GPS": "Gale Power Search",
         "STND": "Gale OneFile: Standard",
         "SPJ.SP01": "Gale: Student Resources in Context",
-        "GDCS": "UNKNOWN Gale code (GDCS)",
-        "GLS": "UNKNOWN Gale code (GLS)",
-        "LITN": "UNKNOWN Gale code (LITN)",
-        "NGMA": "UNKNOWN Gale code (NGMA)",
-        "PPMI": "UNKNOWN Gale code (PPMI)",
-        "PPNU": "UNKNOWN Gale code (PPNU)",
-        "SAS": "UNKNOWN Gale code (SAS)"
+        "GDCS": "Gale Primary Sources",
+        "GLS": "Gale Literature",
+        "LITN": "Gale Literary Index",
+        "NGMA": "Gale Presents: National Geographic Virtual Library",
+        "PPMI": "Gale OneFile: Military and Intelligence",
+        "PPNU": "Gale OneFile: Nursing and Allied Health",
+        "SAS": "Slavery and Anti-Slavery: A Transnational Archive"
     },
     "domains": {
         "_comment": "Maps domains to friendly names for vendors without db codes in URLs",
