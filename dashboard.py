@@ -304,11 +304,13 @@ def compute_metrics(records: list, institution_ranges: dict, log_name: str,
     platform_counts = Counter()
     resource_counts = Counter()
     primo_count = 0
+    referrer_counts = Counter()
     hour_counts = Counter()
     day_counts = Counter()
     dow_counts = Counter()
     status_counts = Counter()
     action_counts = Counter()
+    compact_records = []
 
     for r in records:
         # Institution
@@ -331,9 +333,21 @@ def compute_metrics(records: list, institution_ranges: dict, log_name: str,
         if db_name:
             resource_counts[db_name] += 1
 
-        # Primo referrals
-        if r['referrer'] and 'primo' in r['referrer'].lower():
-            primo_count += 1
+        # Referrer tracking
+        ref_domain = None
+        if r['referrer']:
+            if 'primo' in r['referrer'].lower():
+                primo_count += 1
+            try:
+                ref_domain = urlparse(r['referrer']).netloc.lower()
+                for prefix in ('www.', 'search.', 'login.', 'link.'):
+                    if ref_domain.startswith(prefix):
+                        ref_domain = ref_domain[len(prefix):]
+                        break
+                if ref_domain:
+                    referrer_counts[ref_domain] += 1
+            except Exception:
+                pass
 
         # Time distributions
         ts = r['timestamp']
@@ -344,6 +358,22 @@ def compute_metrics(records: list, institution_ranges: dict, log_name: str,
         # Status & actions
         status_counts[r['status']] += 1
         action_counts[r['action']] += 1
+
+        # Compact record for client-side date filtering
+        compact_records.append({
+            'd': ts.strftime('%Y-%m-%d'),
+            'h': ts.hour,
+            'w': ts.strftime('%A'),
+            'inst': inst,
+            'plat': platform,
+            'db': db_name,
+            'ref': ref_domain,
+            'auth': bool(r['emplid']),
+            'uid': r['emplid'],
+            'sid': r['session'],
+            'st': r['status'],
+            'act': r['action'],
+        })
 
     # --- Aggregate results ---
     off_campus = inst_counts.pop('Off-campus', 0)
@@ -363,6 +393,11 @@ def compute_metrics(records: list, institution_ranges: dict, log_name: str,
     top_resources = [
         {'name': name, 'count': count}
         for name, count in resource_counts.most_common(20)
+    ]
+
+    top_referrers = [
+        {'name': name, 'count': count}
+        for name, count in referrer_counts.most_common(15)
     ]
 
     hourly = [hour_counts.get(h, 0) for h in range(24)]
@@ -395,6 +430,7 @@ def compute_metrics(records: list, institution_ranges: dict, log_name: str,
         'institutionBreakdown': inst_breakdown,
         'topPlatforms': top_platforms,
         'topResources': top_resources,
+        'topReferrers': top_referrers,
         'hourly': hourly,
         'dailyLabels': daily_labels,
         'dailyValues': daily_values,
@@ -402,6 +438,9 @@ def compute_metrics(records: list, institution_ranges: dict, log_name: str,
         'dowValues': dow_values,
         'statusCodes': status_data,
         'actionTypes': action_data,
+        'records': compact_records,
+        'minDate': records[0]['timestamp'].strftime('%Y-%m-%d'),
+        'maxDate': records[-1]['timestamp'].strftime('%Y-%m-%d'),
     }
 
 
@@ -498,7 +537,13 @@ def build_excel_data_uri(metrics: dict) -> tuple:
     write_table(ws_db, ['Database', 'Connections'], rows)
     autofit_columns(ws_db)
 
-    # ---- Sheet 5: Time Patterns ----
+    # ---- Sheet 5: Referrers ----
+    ws_ref = wb.create_sheet('Referrers')
+    rows = [(d['name'], d['count']) for d in metrics['topReferrers']]
+    write_table(ws_ref, ['Referrer Domain', 'Connections'], rows)
+    autofit_columns(ws_ref)
+
+    # ---- Sheet 6: Time Patterns ----
     ws_time = wb.create_sheet('Time Patterns')
     row = 1
 
@@ -701,8 +746,53 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   }
   .export-buttons a:hover { background: #2c5282; }
 
+  .date-filter {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  .date-filter label {
+    font-size: 10pt;
+    color: #4a5568;
+    font-weight: 600;
+  }
+  .date-filter input[type="date"] {
+    font-family: Arial, sans-serif;
+    font-size: 10pt;
+    padding: 6px 10px;
+    border: 1px solid #cbd5e0;
+    border-radius: 6px;
+    color: #2d3748;
+  }
+  .date-filter button {
+    font-family: Arial, sans-serif;
+    font-size: 10pt;
+    padding: 7px 18px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .date-filter .apply-btn {
+    background: #2b6cb0;
+    color: white;
+  }
+  .date-filter .apply-btn:hover { background: #2c5282; }
+  .date-filter .reset-btn {
+    background: #e2e8f0;
+    color: #4a5568;
+  }
+  .date-filter .reset-btn:hover { background: #cbd5e0; }
+  .date-filter .filter-status {
+    font-size: 10pt;
+    color: #c05621;
+    font-weight: 600;
+  }
+
   @media print {
-    .export-buttons { display: none; }
+    .export-buttons, .date-filter { display: none; }
     body { background: white; padding: 0; }
     .panel { box-shadow: none; break-inside: avoid; }
     .card { box-shadow: none; }
@@ -721,26 +811,36 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <a href="__EXCEL_DATA_URI__" download="__EXCEL_FILENAME__">Export to Excel</a>
 </div>
 
+<div class="date-filter">
+  <label for="startDate">From</label>
+  <input type="date" id="startDate">
+  <label for="endDate">To</label>
+  <input type="date" id="endDate">
+  <button class="apply-btn" onclick="applyDateFilter()">Apply</button>
+  <button class="reset-btn" onclick="resetDateFilter()">Reset</button>
+  <span class="filter-status" id="filterStatus"></span>
+</div>
+
 <!-- Summary Cards -->
 <div class="cards">
   <div class="card blue">
-    <div class="number">__TOTAL__</div>
+    <div class="number" id="cardTotal">__TOTAL__</div>
     <div class="label">Total Connections</div>
   </div>
   <div class="card teal">
-    <div class="number">__UNIQUE_USERS__</div>
+    <div class="number" id="cardUsers">__UNIQUE_USERS__</div>
     <div class="label">Unique EMPLIDs</div>
   </div>
   <div class="card purple">
-    <div class="number">__UNIQUE_SESSIONS__</div>
+    <div class="number" id="cardSessions">__UNIQUE_SESSIONS__</div>
     <div class="label">Unique Sessions</div>
   </div>
   <div class="card orange">
-    <div class="number">__PRIMO_PCT__%</div>
+    <div class="number" id="cardPrimo">__PRIMO_PCT__%</div>
     <div class="label">From Primo</div>
   </div>
   <div class="card green">
-    <div class="number">__ON_CAMPUS_PCT__%</div>
+    <div class="number" id="cardCampus">__ON_CAMPUS_PCT__%</div>
     <div class="label">On-Campus</div>
   </div>
 </div>
@@ -777,7 +877,17 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Row 3: Hourly + Daily -->
+<!-- Row 3: Referring Domains (full width) -->
+<div class="grid-2">
+  <div class="panel" style="grid-column: 1 / -1;">
+    <h2>Top Referring Domains</h2>
+    <div class="chart-container">
+      <canvas id="referrerBar" aria-label="Bar chart showing top referring domains by connection count" role="img"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- Row 4: Hourly + Daily -->
 <div class="grid-2">
   <div class="panel">
     <h2>Connections by Hour</h2>
@@ -836,7 +946,6 @@ var TEAL   = ['#2c7a7b','#38a169','#48bb78','#68d391','#9ae6b4','#c6f6d5'];
 var WARM   = ['#c05621','#dd6b20','#ed8936','#f6ad55','#fbd38d','#fefcbf'];
 var PURPLE = ['#6b46c1','#805ad5','#9f7aea','#b794f4','#d6bcfa','#e9d8fd'];
 
-// Generate enough colors for institution bars
 function generateColors(n) {
   var all = [];
   var palettes = [BLUE, TEAL, PURPLE, WARM];
@@ -846,192 +955,231 @@ function generateColors(n) {
   return all;
 }
 
-// --- Campus Pie ---
-new Chart(document.getElementById('campusPie'), {
-  type: 'doughnut',
-  data: {
-    labels: ['On-Campus', 'Off-Campus'],
-    datasets: [{
-      data: [DATA.onCampus, DATA.offCampus],
-      backgroundColor: [BLUE[0], '#e2e8f0'],
-      borderWidth: 0
-    }]
-  },
-  options: {
-    plugins: {
-      legend: { position: 'bottom', labels: { font: { family: 'Arial', size: 12 } } }
-    }
-  }
-});
+// --- Chart instances (for destroy/recreate on filter) ---
+var charts = {};
 
-// --- Institution Bar ---
-(function() {
-  var labels = DATA.institutionBreakdown.map(function(d) { return d.name; });
-  var values = DATA.institutionBreakdown.map(function(d) { return d.count; });
-  var colors = generateColors(labels.length);
-  new Chart(document.getElementById('instBar'), {
-    type: 'bar',
-    data: {
-      labels: labels,
-      datasets: [{ data: values, backgroundColor: colors, borderWidth: 0 }]
-    },
-    options: {
-      indexAxis: 'y',
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { font: { family: 'Arial', size: 11 } } },
-        y: { ticks: { font: { family: 'Arial', size: 11 } } }
-      }
-    }
+function destroyAllCharts() {
+  Object.keys(charts).forEach(function(key) {
+    if (charts[key]) charts[key].destroy();
   });
-})();
+  charts = {};
+}
 
-// --- Top Platforms ---
-(function() {
-  var labels = DATA.topPlatforms.map(function(d) { return d.name; });
-  var values = DATA.topPlatforms.map(function(d) { return d.count; });
-  new Chart(document.getElementById('platformBar'), {
-    type: 'bar',
-    data: {
-      labels: labels,
-      datasets: [{ data: values, backgroundColor: BLUE[2], borderWidth: 0 }]
-    },
-    options: {
-      indexAxis: 'y',
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { font: { family: 'Arial', size: 11 } } },
-        y: { ticks: { font: { family: 'Arial', size: 11 } } }
-      }
+// --- Compute metrics from a record array ---
+function computeFromRecords(recs) {
+  var total = recs.length;
+  var onCampus = 0, offCampus = 0, authenticated = 0;
+  var uids = {}, sids = {};
+  var instCounts = {}, platCounts = {}, dbCounts = {}, refCounts = {};
+  var hourCounts = new Array(24).fill(0);
+  var dayCounts = {}, dowCounts = {};
+  var statusCounts = {}, actionCounts = {};
+  var primoCount = 0;
+
+  recs.forEach(function(r) {
+    if (r.inst === 'Off-campus') { offCampus++; } else { onCampus++; instCounts[r.inst] = (instCounts[r.inst] || 0) + 1; }
+    if (r.auth) { authenticated++; }
+    if (r.uid) uids[r.uid] = true;
+    if (r.sid) sids[r.sid] = true;
+    if (r.plat) platCounts[r.plat] = (platCounts[r.plat] || 0) + 1;
+    if (r.db) dbCounts[r.db] = (dbCounts[r.db] || 0) + 1;
+    if (r.ref) {
+      refCounts[r.ref] = (refCounts[r.ref] || 0) + 1;
+      if (r.ref.indexOf('primo') !== -1) primoCount++;
     }
+    hourCounts[r.h]++;
+    dayCounts[r.d] = (dayCounts[r.d] || 0) + 1;
+    dowCounts[r.w] = (dowCounts[r.w] || 0) + 1;
+    statusCounts[r.st] = (statusCounts[r.st] || 0) + 1;
+    actionCounts[r.act] = (actionCounts[r.act] || 0) + 1;
   });
-})();
 
-// --- Top Databases ---
-(function() {
-  var labels = DATA.topResources.map(function(d) { return d.name; });
-  var values = DATA.topResources.map(function(d) { return d.count; });
-  new Chart(document.getElementById('resourceBar'), {
-    type: 'bar',
-    data: {
-      labels: labels,
-      datasets: [{ data: values, backgroundColor: TEAL[1], borderWidth: 0 }]
-    },
-    options: {
-      indexAxis: 'y',
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { font: { family: 'Arial', size: 11 } } },
-        y: { ticks: { font: { family: 'Arial', size: 10 } } }
-      }
-    }
+  function toSorted(obj, limit) {
+    return Object.keys(obj).map(function(k) { return {name: k, count: obj[k]}; })
+      .sort(function(a, b) { return b.count - a.count; })
+      .slice(0, limit || 999);
+  }
+
+  var sortedDays = Object.keys(dayCounts).sort();
+  var dailyLabels = sortedDays.map(function(d) {
+    var parts = d.split('-');
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return months[parseInt(parts[1], 10) - 1] + ' ' + parseInt(parts[2], 10);
   });
-})();
+  var dailyValues = sortedDays.map(function(d) { return dayCounts[d]; });
 
-// --- Hourly Bar ---
-(function() {
-  var labels = [];
-  for (var h = 0; h < 24; h++) {
-    var hr = h % 12 || 12;
-    labels.push(hr + (h < 12 ? 'am' : 'pm'));
-  }
-  new Chart(document.getElementById('hourlyBar'), {
-    type: 'bar',
+  var dowOrder = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+  var dowValues = dowOrder.map(function(d) { return dowCounts[d] || 0; });
+
+  return {
+    total: total, onCampus: onCampus, offCampus: offCampus,
+    uniqueUsers: Object.keys(uids).length, uniqueSessions: Object.keys(sids).length,
+    authenticated: authenticated, unauthenticated: total - authenticated,
+    primoReferrals: primoCount,
+    institutionBreakdown: toSorted(instCounts),
+    topPlatforms: toSorted(platCounts, 15),
+    topResources: toSorted(dbCounts, 20),
+    topReferrers: toSorted(refCounts, 15),
+    hourly: hourCounts,
+    dailyLabels: dailyLabels, dailyValues: dailyValues,
+    dowLabels: dowOrder, dowValues: dowValues,
+    statusCodes: Object.keys(statusCounts).map(function(k) { return {code: k, count: statusCounts[k]}; })
+      .sort(function(a, b) { return b.count - a.count; }),
+    actionTypes: Object.keys(actionCounts).map(function(k) { return {action: k, count: actionCounts[k]}; })
+      .sort(function(a, b) { return b.count - a.count; })
+  };
+}
+
+// --- Render all charts and cards from metrics ---
+function renderDashboard(m) {
+  // Update summary cards
+  document.getElementById('cardTotal').textContent = m.total.toLocaleString();
+  document.getElementById('cardUsers').textContent = m.uniqueUsers.toLocaleString();
+  document.getElementById('cardSessions').textContent = m.uniqueSessions.toLocaleString();
+  var primoPct = m.total ? (m.primoReferrals / m.total * 100).toFixed(1) : '0';
+  document.getElementById('cardPrimo').textContent = primoPct + '%';
+  var campusPct = m.total ? (m.onCampus / m.total * 100).toFixed(1) : '0';
+  document.getElementById('cardCampus').textContent = campusPct + '%';
+
+  destroyAllCharts();
+
+  // Campus Pie
+  charts.campus = new Chart(document.getElementById('campusPie'), {
+    type: 'doughnut',
     data: {
-      labels: labels,
-      datasets: [{
-        data: DATA.hourly,
-        backgroundColor: BLUE[2],
-        borderWidth: 0
-      }]
+      labels: ['On-Campus', 'Off-Campus'],
+      datasets: [{ data: [m.onCampus, m.offCampus], backgroundColor: [BLUE[0], '#e2e8f0'], borderWidth: 0 }]
     },
-    options: {
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { font: { family: 'Arial', size: 10 } } },
-        y: { beginAtZero: true, ticks: { font: { family: 'Arial', size: 11 } } }
-      }
-    }
+    options: { plugins: { legend: { position: 'bottom', labels: { font: { family: 'Arial', size: 12 } } } } }
   });
-})();
 
-// --- Daily Bar ---
-new Chart(document.getElementById('dailyBar'), {
-  type: 'bar',
-  data: {
-    labels: DATA.dailyLabels,
-    datasets: [{
-      data: DATA.dailyValues,
-      backgroundColor: PURPLE[2],
-      borderWidth: 0
-    }]
-  },
-  options: {
-    plugins: { legend: { display: false } },
-    scales: {
-      x: { ticks: { font: { family: 'Arial', size: 10 }, maxRotation: 45 } },
-      y: { beginAtZero: true, ticks: { font: { family: 'Arial', size: 11 } } }
-    }
-  }
-});
+  // Institution Bar
+  var instLabels = m.institutionBreakdown.map(function(d) { return d.name; });
+  var instValues = m.institutionBreakdown.map(function(d) { return d.count; });
+  charts.inst = new Chart(document.getElementById('instBar'), {
+    type: 'bar',
+    data: { labels: instLabels, datasets: [{ data: instValues, backgroundColor: generateColors(instLabels.length), borderWidth: 0 }] },
+    options: { indexAxis: 'y', plugins: { legend: { display: false } },
+      scales: { x: { ticks: { font: { family: 'Arial', size: 11 } } }, y: { ticks: { font: { family: 'Arial', size: 11 } } } } }
+  });
 
-// --- Day of Week Bar ---
-new Chart(document.getElementById('dowBar'), {
-  type: 'bar',
-  data: {
-    labels: DATA.dowLabels.map(function(d) { return d.substring(0, 3); }),
-    datasets: [{
-      data: DATA.dowValues,
-      backgroundColor: WARM[1],
-      borderWidth: 0
-    }]
-  },
-  options: {
-    plugins: { legend: { display: false } },
-    scales: {
-      x: { ticks: { font: { family: 'Arial', size: 11 } } },
-      y: { beginAtZero: true, ticks: { font: { family: 'Arial', size: 11 } } }
-    }
-  }
-});
+  // Top Platforms
+  var platLabels = m.topPlatforms.map(function(d) { return d.name; });
+  var platValues = m.topPlatforms.map(function(d) { return d.count; });
+  charts.plat = new Chart(document.getElementById('platformBar'), {
+    type: 'bar',
+    data: { labels: platLabels, datasets: [{ data: platValues, backgroundColor: BLUE[2], borderWidth: 0 }] },
+    options: { indexAxis: 'y', plugins: { legend: { display: false } },
+      scales: { x: { ticks: { font: { family: 'Arial', size: 11 } } }, y: { ticks: { font: { family: 'Arial', size: 11 } } } } }
+  });
 
-// --- Auth Donut ---
-new Chart(document.getElementById('authDonut'), {
-  type: 'doughnut',
-  data: {
-    labels: ['Authenticated', 'Unauthenticated'],
-    datasets: [{
-      data: [DATA.authenticated, DATA.unauthenticated],
-      backgroundColor: [TEAL[0], '#e2e8f0'],
-      borderWidth: 0
-    }]
-  },
-  options: {
-    plugins: {
-      legend: { position: 'bottom', labels: { font: { family: 'Arial', size: 12 } } }
-    }
-  }
-});
+  // Top Databases
+  var dbLabels = m.topResources.map(function(d) { return d.name; });
+  var dbValues = m.topResources.map(function(d) { return d.count; });
+  charts.db = new Chart(document.getElementById('resourceBar'), {
+    type: 'bar',
+    data: { labels: dbLabels, datasets: [{ data: dbValues, backgroundColor: TEAL[1], borderWidth: 0 }] },
+    options: { indexAxis: 'y', plugins: { legend: { display: false } },
+      scales: { x: { ticks: { font: { family: 'Arial', size: 11 } } }, y: { ticks: { font: { family: 'Arial', size: 10 } } } } }
+  });
 
-// --- Status & Action Tables ---
-(function() {
-  var total = DATA.total;
+  // Top Referrers
+  var refLabels = m.topReferrers.map(function(d) { return d.name; });
+  var refValues = m.topReferrers.map(function(d) { return d.count; });
+  charts.ref = new Chart(document.getElementById('referrerBar'), {
+    type: 'bar',
+    data: { labels: refLabels, datasets: [{ data: refValues, backgroundColor: WARM[2], borderWidth: 0 }] },
+    options: { indexAxis: 'y', plugins: { legend: { display: false } },
+      scales: { x: { ticks: { font: { family: 'Arial', size: 11 } } }, y: { ticks: { font: { family: 'Arial', size: 11 } } } } }
+  });
+
+  // Hourly Bar
+  var hourLabels = [];
+  for (var h = 0; h < 24; h++) { hourLabels.push((h % 12 || 12) + (h < 12 ? 'am' : 'pm')); }
+  charts.hourly = new Chart(document.getElementById('hourlyBar'), {
+    type: 'bar',
+    data: { labels: hourLabels, datasets: [{ data: m.hourly, backgroundColor: BLUE[2], borderWidth: 0 }] },
+    options: { plugins: { legend: { display: false } },
+      scales: { x: { ticks: { font: { family: 'Arial', size: 10 } } }, y: { beginAtZero: true, ticks: { font: { family: 'Arial', size: 11 } } } } }
+  });
+
+  // Daily Bar
+  charts.daily = new Chart(document.getElementById('dailyBar'), {
+    type: 'bar',
+    data: { labels: m.dailyLabels, datasets: [{ data: m.dailyValues, backgroundColor: PURPLE[2], borderWidth: 0 }] },
+    options: { plugins: { legend: { display: false } },
+      scales: { x: { ticks: { font: { family: 'Arial', size: 10 }, maxRotation: 45 } }, y: { beginAtZero: true, ticks: { font: { family: 'Arial', size: 11 } } } } }
+  });
+
+  // Day of Week
+  charts.dow = new Chart(document.getElementById('dowBar'), {
+    type: 'bar',
+    data: { labels: m.dowLabels.map(function(d) { return d.substring(0, 3); }),
+            datasets: [{ data: m.dowValues, backgroundColor: WARM[1], borderWidth: 0 }] },
+    options: { plugins: { legend: { display: false } },
+      scales: { x: { ticks: { font: { family: 'Arial', size: 11 } } }, y: { beginAtZero: true, ticks: { font: { family: 'Arial', size: 11 } } } } }
+  });
+
+  // Auth Donut
+  charts.auth = new Chart(document.getElementById('authDonut'), {
+    type: 'doughnut',
+    data: { labels: ['Authenticated', 'Unauthenticated'],
+            datasets: [{ data: [m.authenticated, m.unauthenticated], backgroundColor: [TEAL[0], '#e2e8f0'], borderWidth: 0 }] },
+    options: { plugins: { legend: { position: 'bottom', labels: { font: { family: 'Arial', size: 12 } } } } }
+  });
+
+  // Status & Action Tables
+  var total = m.total;
   var html = '';
-  DATA.statusCodes.forEach(function(d) {
-    var pct = (d.count / total * 100).toFixed(1);
-    html += '<tr><td>' + d.code + '</td><td>' + d.count.toLocaleString() +
-            '</td><td>' + pct + '%</td></tr>';
+  m.statusCodes.forEach(function(d) {
+    var pct = total ? (d.count / total * 100).toFixed(1) : '0';
+    html += '<tr><td>' + d.code + '</td><td>' + d.count.toLocaleString() + '</td><td>' + pct + '%</td></tr>';
   });
   document.getElementById('statusTable').innerHTML = html;
 
   html = '';
-  DATA.actionTypes.forEach(function(d) {
-    var pct = (d.count / total * 100).toFixed(1);
-    html += '<tr><td>' + d.action + '</td><td>' + d.count.toLocaleString() +
-            '</td><td>' + pct + '%</td></tr>';
+  m.actionTypes.forEach(function(d) {
+    var pct = total ? (d.count / total * 100).toFixed(1) : '0';
+    html += '<tr><td>' + d.action + '</td><td>' + d.count.toLocaleString() + '</td><td>' + pct + '%</td></tr>';
   });
   document.getElementById('actionTable').innerHTML = html;
-})();
+}
+
+// --- Date filter ---
+function applyDateFilter() {
+  var startVal = document.getElementById('startDate').value;
+  var endVal = document.getElementById('endDate').value;
+  if (!startVal && !endVal) return;
+
+  var filtered = DATA.records.filter(function(r) {
+    if (startVal && r.d < startVal) return false;
+    if (endVal && r.d > endVal) return false;
+    return true;
+  });
+
+  if (filtered.length === 0) {
+    document.getElementById('filterStatus').textContent = 'No records in this range';
+    return;
+  }
+
+  var m = computeFromRecords(filtered);
+  renderDashboard(m);
+  document.getElementById('filterStatus').textContent =
+    'Showing ' + filtered.length.toLocaleString() + ' of ' + DATA.records.length.toLocaleString() + ' records';
+}
+
+function resetDateFilter() {
+  document.getElementById('startDate').value = DATA.minDate;
+  document.getElementById('endDate').value = DATA.maxDate;
+  document.getElementById('filterStatus').textContent = '';
+  var m = computeFromRecords(DATA.records);
+  renderDashboard(m);
+}
+
+// --- Initialize ---
+document.getElementById('startDate').value = DATA.minDate;
+document.getElementById('endDate').value = DATA.maxDate;
+renderDashboard(DATA);
 </script>
 </body>
 </html>"""
